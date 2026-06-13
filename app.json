@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "Yohaku Reminder",
+    "slug": "yohaku-reminder",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "yohakureminder",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.leololo1.yohakureminder",
+      "buildNumber": "1",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "extra": {
+      "eas": {
+        "projectId": ""
+      }
+    }
+  }
+}

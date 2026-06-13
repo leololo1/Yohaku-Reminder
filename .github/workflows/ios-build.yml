@@ -1,0 +1,134 @@
+name: iOS Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to build
+        required: true
+        default: develop
+        type: choice
+        options:
+          - develop
+          - main
+      profile:
+        description: Build profile
+        required: true
+        default: development
+        type: choice
+        options:
+          - production
+          - development
+  push:
+    branches:
+      - develop
+    paths:
+      - "package.json"
+      - "package-lock.json"
+      - "app.json"
+      - "eas.json"
+      - ".github/workflows/**"
+      - "ios/**"
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      PROFILE: ${{ github.event.inputs.profile || 'development' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || github.ref }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.4
+
+      - name: Verify Xcode / SDK
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Setup Expo and EAS
+        uses: expo/expo-github-action@v8
+        with:
+          expo-version: latest
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Verify required secrets
+        shell: bash
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EAS_PROJECT_ID: ${{ secrets.EAS_PROJECT_ID }}
+          CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+        run: |
+          if [[ -z "$EXPO_TOKEN" || -z "$EAS_PROJECT_ID" || -z "$CERTIFICATE_P12" || -z "$CERTIFICATE_PASSWORD" || -z "$PROVISIONING_PROFILE" ]]; then
+            echo "Missing one or more required secrets."
+            exit 1
+          fi
+
+      - name: Configure EAS project ID
+        shell: bash
+        env:
+          EAS_PROJECT_ID: ${{ secrets.EAS_PROJECT_ID }}
+        run: |
+          node -e "const fs=require('fs');const path='app.json';const json=JSON.parse(fs.readFileSync(path,'utf8'));json.expo=json.expo||{};json.expo.extra=json.expo.extra||{};json.expo.extra.eas=json.expo.extra.eas||{};json.expo.extra.eas.projectId=process.env.EAS_PROJECT_ID;fs.writeFileSync(path, JSON.stringify(json, null, 2));"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          if [[ -f package-lock.json ]]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Install Apple certificate and provisioning profile
+        shell: bash
+        env:
+          CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+          KEYCHAIN_PASSWORD: build
+        run: |
+          CERTIFICATE_PASSWORD_CLEAN="$(printf '%s' "$CERTIFICATE_PASSWORD" | tr -d '\r\n')"
+          printf '%s' "$CERTIFICATE_P12" | tr -d '\r\n ' | base64 --decode > certificate.p12
+          printf '%s' "$PROVISIONING_PROFILE" | tr -d '\r\n ' | base64 --decode > build.mobileprovision
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security import certificate.p12 -k build.keychain -P "$CERTIFICATE_PASSWORD_CLEAN" -T /usr/bin/codesign -T /usr/bin/productsign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp build.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/
+
+      - name: Expo prebuild (iOS)
+        run: npx expo prebuild --platform ios --no-install
+
+      - name: Generate credentials.json
+        shell: bash
+        env:
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          CERTIFICATE_PASSWORD_CLEAN="$(printf '%s' "$CERTIFICATE_PASSWORD" | tr -d '\r\n')"
+          node -e "const fs=require('fs');const password=process.env.CERTIFICATE_PASSWORD_CLEAN;const data={ios:{provisioningProfilePath:'build.mobileprovision',distributionCertificate:{path:'certificate.p12',password}}};fs.writeFileSync('credentials.json', JSON.stringify(data, null, 2)+'\n');"
+
+      - name: Build iOS (EAS local)
+        shell: bash
+        run: eas build --platform ios --profile "$PROFILE" --local --non-interactive --output=./build.ipa
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build
+          path: build.ipa
+          if-no-files-found: error
