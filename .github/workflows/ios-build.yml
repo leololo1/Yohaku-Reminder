@@ -13,7 +13,7 @@ on:
           - develop
           - main
       profile:
-        description: Build profile
+        description: Build profile (production or development)
         required: true
         default: development
         type: choice
