@@ -1,4 +1,5 @@
 name: iOS Build
+# Re-run note: keep this workflow editable for manual retry commits when CI secrets change.
 
 on:
   workflow_dispatch:
