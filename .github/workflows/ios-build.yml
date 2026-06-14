@@ -68,8 +68,9 @@ jobs:
           CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+          WIDGET_PROVISIONING_PROFILE: ${{ secrets.APPLE_WIDGET_PROVISIONING_PROFILE }}
         run: |
-          if [[ -z "$EXPO_TOKEN" || -z "$EAS_PROJECT_ID" || -z "$CERTIFICATE_P12" || -z "$CERTIFICATE_PASSWORD" || -z "$PROVISIONING_PROFILE" ]]; then
+          if [[ -z "$EXPO_TOKEN" || -z "$EAS_PROJECT_ID" || -z "$CERTIFICATE_P12" || -z "$CERTIFICATE_PASSWORD" || -z "$PROVISIONING_PROFILE" || -z "$WIDGET_PROVISIONING_PROFILE" ]]; then
             echo "Missing one or more required secrets."
             exit 1
           fi
@@ -96,11 +97,13 @@ jobs:
           CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+          WIDGET_PROVISIONING_PROFILE: ${{ secrets.APPLE_WIDGET_PROVISIONING_PROFILE }}
           KEYCHAIN_PASSWORD: build
         run: |
           CERTIFICATE_PASSWORD_CLEAN="$(printf '%s' "$CERTIFICATE_PASSWORD" | tr -d '\r\n')"
           printf '%s' "$CERTIFICATE_P12" | tr -d '\r\n ' | base64 --decode > certificate.p12
           printf '%s' "$PROVISIONING_PROFILE" | tr -d '\r\n ' | base64 --decode > build.mobileprovision
+          printf '%s' "$WIDGET_PROVISIONING_PROFILE" | tr -d '\r\n ' | base64 --decode > widget.mobileprovision
 
           security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
           security default-keychain -s build.keychain
@@ -111,6 +114,7 @@ jobs:
 
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
           cp build.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/
+          cp widget.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/
 
       - name: Expo prebuild (iOS)
         run: npx expo prebuild --platform ios --no-install
@@ -120,12 +124,70 @@ jobs:
         env:
           CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         run: |
-          CERTIFICATE_PASSWORD_CLEAN="$(printf '%s' "$CERTIFICATE_PASSWORD" | tr -d '\r\n')"
-          node -e "const fs=require('fs');const password=process.env.CERTIFICATE_PASSWORD_CLEAN;const data={ios:{provisioningProfilePath:'build.mobileprovision',distributionCertificate:{path:'certificate.p12',password}}};fs.writeFileSync('credentials.json', JSON.stringify(data, null, 2)+'\n');"
+          export CERTIFICATE_PASSWORD_CLEAN="$(printf '%s' "$CERTIFICATE_PASSWORD" | tr -d '\r\n')"
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+
+          const password = process.env.CERTIFICATE_PASSWORD_CLEAN;
+          if (!password) {
+            console.error('CERTIFICATE_PASSWORD_CLEAN is empty.');
+            process.exit(1);
+          }
+
+          const iosDir = 'ios';
+          const xcodeproj = fs.readdirSync(iosDir).find((entry) => entry.endsWith('.xcodeproj'));
+          if (!xcodeproj) {
+            console.error('No .xcodeproj found under ios/.');
+            process.exit(1);
+          }
+
+          const pbxPath = path.join(iosDir, xcodeproj, 'project.pbxproj');
+          const pbx = fs.readFileSync(pbxPath, 'utf8');
+          const targets = [];
+          for (const section of pbx.split('isa = PBXNativeTarget;').slice(1)) {
+            const nameMatch = section.match(/\n\t\t\tname = ([^;]+);/);
+            if (nameMatch) {
+              const targetName = nameMatch[1].trim();
+              if (!targets.includes(targetName)) {
+                targets.push(targetName);
+              }
+            }
+          }
+
+          if (targets.length === 0) {
+            console.error('No native iOS targets found in Xcode project.');
+            process.exit(1);
+          }
+
+          const distributionCertificate = {
+            path: 'certificate.p12',
+            password,
+          };
+
+          const iosCredentials = {};
+          for (const target of targets) {
+            const isWidgetTarget = /widget/i.test(target);
+            iosCredentials[target] = {
+              provisioningProfilePath: isWidgetTarget ? 'widget.mobileprovision' : 'build.mobileprovision',
+              distributionCertificate,
+            };
+          }
+
+          fs.writeFileSync('credentials.json', `${JSON.stringify({ ios: iosCredentials }, null, 2)}\n`);
+          console.log(`credentials.json targets: ${Object.keys(iosCredentials).join(', ')}`);
+          NODE
+
+          node -e "const c=require('./credentials.json'); if (typeof c.ios?.provisioningProfilePath === 'string') { console.error('credentials.json is flat single-target format.'); process.exit(1); } console.log('credentials.json ios keys:', Object.keys(c.ios||{}).join(', '));"
 
       - name: Build iOS (EAS local)
         shell: bash
-        run: eas build --platform ios --profile "$PROFILE" --local --non-interactive --output=./build.ipa
+        run: |
+          if [[ ! -f credentials.json ]]; then
+            echo "credentials.json is missing."
+            exit 1
+          fi
+          eas build --platform ios --profile "$PROFILE" --local --non-interactive --output=./build.ipa
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
